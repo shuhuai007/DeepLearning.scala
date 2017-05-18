@@ -25,9 +25,9 @@ import org.nd4j.linalg.util.ArrayUtil
 import org.nd4s.Implicits._
 import com.thoughtworks.each.Monadic._
 import com.thoughtworks.raii.asynchronous
-import shapeless.the
+import shapeless.{Lazy, Poly0, the}
 import com.thoughtworks.deeplearning.math._
-import com.thoughtworks.feature.{Caller, Constructor}
+import com.thoughtworks.feature.{Caller, Constructor, Demixin}
 import com.thoughtworks.feature.Override.inject
 
 import scala.concurrent.ExecutionContext
@@ -37,6 +37,9 @@ import scalaz.concurrent.{Future, Task}
 import scalaz.syntax.all._
 import scala.{Double => ScalaDouble}
 import org.nd4j.linalg.api.ndarray.{INDArray => ND4JArray}
+import shapeless.PolyDefns.Case0
+
+import scala.annotation.meta.getter
 
 object INDArray extends INDArrayCompanion {
 
@@ -52,18 +55,31 @@ object INDArray extends INDArrayCompanion {
 
   trait Hyperparameter extends Serializable {
 
-    trait Weight extends Serializable {
+    trait Weight extends Serializable with Poly0 {
 
       var data: ND4JArray
 
-      final def backward(deltaFuture: Do[ND4JArray])(implicit logger: Logger = Logger.getGlobal,
-                                                     fullName: sourcecode.FullName,
-                                                     className: Caller[_],
-                                                     methodName: sourcecode.Name,
-                                                     executionContext: ExecutionContext): Future[Unit] = {
+      type Dependencies = demixinDependencies.Out
+
+      implicit final def forward(implicit logger: Logger = Logger.getGlobal,
+                                 fullName: sourcecode.FullName,
+                                 caller: Caller[_],
+                                 methodName: sourcecode.Name,
+                                 executionContext: ExecutionContext,
+                                 lazyDependencies: Lazy.Values[demixinDependencies.Out]) = at {
+        Tape(data, backward)
+      }
+
+      final def backward(deltaFuture: Do[ND4JArray])(
+          implicit logger: Logger = Logger.getGlobal,
+          fullName: sourcecode.FullName,
+          className: Caller[_],
+          methodName: sourcecode.Name,
+          executionContext: ExecutionContext,
+          lazyDependencies: Lazy.Values[demixinDependencies.Out]): Future[Unit] = {
         Do.run(Do.releaseFlatMap(deltaFuture) { delta =>
             Do.jump().map { unit: Unit =>
-              data -= optimizerConstructor.newInstance(this, delta).delta
+              data -= optimizerConstructor.newInstance(this, delta, lazyDependencies.values).delta
               ()
             }
           })
@@ -80,12 +96,19 @@ object INDArray extends INDArrayCompanion {
 
     type INDArrayOptimizer <: Optimizer
 
-    abstract class Optimizer(val weight: INDArrayWeight, delta0: ND4JArray) {
+    abstract class Optimizer(val weight: INDArrayWeight, delta0: ND4JArray, dependencies: demixinDependencies.Out) {
       def delta: ND4JArray = delta0
     }
 
+    type INDArrayOptimizerDependencies
+
+    @(inject @getter)
+    val demixinDependencies: Demixin[INDArrayOptimizerDependencies]
+
+//    @inject
+
     @inject
-    def optimizerConstructor: Constructor[(Weight, ND4JArray) => INDArrayOptimizer]
+    def optimizerConstructor: Constructor[(Weight, ND4JArray, demixinDependencies.Out) => INDArrayOptimizer]
 
   }
 
@@ -258,19 +281,28 @@ object INDArray extends INDArrayCompanion {
     import com.thoughtworks.deeplearning.differentiable.Double.DoubleTape
     import com.thoughtworks.deeplearning.tapefactories.Binary.semigroupBinaryTapeTaskFactory
     import com.thoughtworks.deeplearning.tapefactories.Unary.semigroupUnaryTapeTaskFactory
-    
-    implicit def liftINDArrayWeight[W <: Hyperparameter#Weight](implicit logger: Logger = Logger.getGlobal,
-                                                                fullName: sourcecode.FullName,
-                                                                caller: Caller[_],
-                                                                methodName: sourcecode.Name,
-                                                                executionContext: ExecutionContext) = new Lift[W] {
+
+    implicit def liftINDArrayWeight[W <: Hyperparameter#Weight](
+        implicit forwardCase: Case0.Aux[W, Do[Tape[ND4JArray, ND4JArray]]]) = new Lift[W] {
       override type Data = ND4JArray
       override type Delta = ND4JArray
       override def apply(weight: W): Do[Tape[Data, Delta]] = {
-        import weight._
-        Do.delay(Tape(data, backward))
+//        import weight._
+        forwardCase()
       }
     }
+//    implicit def liftINDArrayWeight[W <: Hyperparameter#Weight](implicit logger: Logger = Logger.getGlobal,
+//                                                                fullName: sourcecode.FullName,
+//                                                                caller: Caller[_],
+//                                                                methodName: sourcecode.Name,
+//                                                                executionContext: ExecutionContext) = new Lift[W] {
+//      override type Data = ND4JArray
+//      override type Delta = ND4JArray
+//      override def apply(weight: W): Do[Tape[Data, Delta]] = {
+//        import weight._
+//        Do.delay(Tape(data, backward))
+//      }
+//    }
 
     private implicit object INDArraySemigroup extends Semigroup[ND4JArray] {
       override def append(f1: ND4JArray, f2: => ND4JArray): ND4JArray = f1 + f2

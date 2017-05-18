@@ -102,10 +102,13 @@ final class INDArraySpec extends AsyncFreeSpec with Matchers with Inside {
 
   "Nd4jArray + Nd4jArray" in {
 
+    // TODO: Weight should be some kind of Aux type, not singleton type
     val weight = hyperparameters.indArrayWeight(Nd4j.ones(4, 4))
+    def f:weight.type = weight
+    import weight.forward
 
     def myNetwork(input: Nd4jArray): Do[INDArrayTape] = {
-      weight + input
+      f()(weight.forward) + input
     }
 
     trainAndAssertLossAndWeight(myNetwork, weight)
